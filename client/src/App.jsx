@@ -5,44 +5,110 @@ import { ding } from './bell.js';
 // In dev, Vite proxies /socket.io to the server. In production the server serves this page itself.
 const socket = io({ autoConnect: true });
 
-function useGame() {
-  const [view, setView] = useState(null);
-  const [connected, setConnected] = useState(socket.connected);
+// Your seat at a table is remembered in this browser (a secret token from the server), so a dropped
+// connection or a reloaded page puts you back in the same seat with the same role.
+// Wrapped in try/catch because storage can be blocked (private windows, strict settings).
+const SESSION_KEY = 'wstb-session';
 
-  useEffect(() => {
-    // skew = how far this phone's clock is from the server's, so the countdown matches for everyone.
-    const onState = (s) => setView({ ...s, skew: s.serverNow - Date.now() });
-    const onConnect = () => setConnected(true);
-    const onDisconnect = () => {
-      setConnected(false);
-      setView(null); // rooms live on the server; a dropped connection means a new socket id
-    };
-    socket.on('state', onState);
-    socket.on('connect', onConnect);
-    socket.on('disconnect', onDisconnect);
-    return () => {
-      socket.off('state', onState);
-      socket.off('connect', onConnect);
-      socket.off('disconnect', onDisconnect);
-    };
-  }, []);
+function loadSession() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY));
+    return s?.code && s?.token ? s : null;
+  } catch {
+    return null;
+  }
+}
 
-  return { view, connected };
+function saveSession(session) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  } catch {
+    // Without storage the game still works, you just can't rejoin after a reload.
+  }
+}
+
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    // nothing to clear
+  }
 }
 
 function emit(event, payload) {
   return new Promise((resolve) => socket.emit(event, payload, resolve));
 }
 
+function useGame(onNotice) {
+  const [view, setView] = useState(null);
+  const [connected, setConnected] = useState(socket.connected);
+  // True while we're getting back into a table we were in before the page loaded or the connection dropped.
+  const [rejoining, setRejoining] = useState(() => !!loadSession());
+
+  useEffect(() => {
+    // skew = how far this phone's clock is from the server's, so the countdown matches for everyone.
+    const onState = (s) => setView({ ...s, skew: s.serverNow - Date.now() });
+
+    // Runs on the first connection and on every automatic reconnect.
+    const onConnect = async () => {
+      setConnected(true);
+      const session = loadSession();
+      if (!session) {
+        setRejoining(false);
+        return;
+      }
+      const res = await emit('rejoin', session);
+      if (!res?.ok) {
+        clearSession();
+        setView(null);
+        onNotice(res?.error || "Couldn't get back into your table.");
+      }
+      setRejoining(false);
+    };
+
+    const onDisconnect = (reason) => {
+      setConnected(false); // keep the last screen up while we reconnect
+      if (reason === 'io server disconnect') {
+        // The server only does this when the same seat was opened somewhere else.
+        onNotice('This table was opened in another window or tab. Reload this page to use it here instead.');
+      }
+    };
+
+    socket.on('state', onState);
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    if (socket.connected) onConnect();
+    return () => {
+      socket.off('state', onState);
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+    };
+  }, [onNotice]);
+
+  return { view, setView, connected, rejoining };
+}
+
 export default function App() {
-  const { view, connected } = useGame();
   const [error, setError] = useState('');
+  const { view, setView, connected, rejoining } = useGame(setError);
 
   const run = async (event, payload) => {
     setError('');
     const res = await emit(event, payload);
     if (!res?.ok) setError(res?.error || 'Something went wrong.');
+    else if ((event === 'create' || event === 'join') && res.token) {
+      saveSession({ code: res.code, token: res.token });
+    }
     return res;
+  };
+
+  const leave = async () => {
+    const midGame = view && view.phase !== 'lobby' && view.phase !== 'result';
+    if (midGame && !window.confirm("Leave the game? You won't be able to rejoin this round.")) return;
+    await emit('leave');
+    clearSession();
+    setView(null);
+    setError('');
   };
 
   return (
@@ -50,9 +116,18 @@ export default function App() {
       <header className="top">
         <span className="bell-icon" aria-hidden="true">🔔</span>
         <h1>Who Stole the Bell?</h1>
+        {view && (
+          <button className="link" onClick={leave}>
+            Leave table
+          </button>
+        )}
       </header>
 
-      {!connected && <p className="banner">Connecting to the server…</p>}
+      {!connected && (
+        <p className="banner">
+          {view ? 'Connection lost. Reconnecting… your seat is saved.' : 'Connecting to the server…'}
+        </p>
+      )}
       {error && (
         <p className="banner error" role="alert" onClick={() => setError('')}>
           {error}
@@ -60,7 +135,12 @@ export default function App() {
       )}
 
       <main>
-        {!view && <Home run={run} />}
+        {!view && rejoining && (
+          <section className="card">
+            <p className="lede">Getting you back to your table…</p>
+          </section>
+        )}
+        {!view && !rejoining && <Home run={run} />}
         {view?.phase === 'lobby' && <Lobby view={view} run={run} />}
         {view?.phase === 'alibi' && <Alibi view={view} run={run} />}
         {view?.phase === 'discuss' && <Discuss view={view} run={run} />}
@@ -122,6 +202,7 @@ function PlayerList({ players, hostId, meId, children }) {
             {p.name}
             {p.id === meId && <em> (you)</em>}
             {p.id === hostId && <span className="tag">host</span>}
+            {!p.connected && <span className="tag">away</span>}
           </span>
           {children?.(p)}
         </li>
@@ -132,7 +213,8 @@ function PlayerList({ players, hostId, meId, children }) {
 
 function Lobby({ view, run }) {
   const isHost = view.hostId === view.meId;
-  const enough = view.players.length >= view.minPlayers;
+  const online = view.players.filter((p) => p.connected).length;
+  const enough = online >= view.minPlayers;
 
   return (
     <section className="card">
@@ -144,7 +226,7 @@ function Lobby({ view, run }) {
 
       {isHost ? (
         <button className="primary" disabled={!enough} onClick={() => run('start')}>
-          {enough ? 'Start the night' : `Need ${view.minPlayers - view.players.length} more`}
+          {enough ? 'Start the night' : `Need ${view.minPlayers - online} more`}
         </button>
       ) : (
         <p className="hint">Waiting for the host to start…</p>

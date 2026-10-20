@@ -1,6 +1,5 @@
 // Simulates a full game with 4 clients against a running server.
-// Usage: DISCUSS_SECONDS=2 node index.js (in one terminal), then node test-sim.js
-// (DISCUSS_SECONDS keeps the discussion short so the timer check doesn't take two minutes.)
+// Run via `npm test` (run-tests.js starts a server with a short discussion timer and runs this).
 const { io } = require('socket.io-client');
 const assert = require('assert');
 
@@ -73,18 +72,18 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   assert((await host.emit('chat', { text: 'still can talk while voting' })).ok, 'chat open during vote');
 
   // Self-vote rejected
-  assert.strictEqual((await host.emit('vote', { suspectId: host.socket.id })).ok, false, 'self vote rejected');
+  assert.strictEqual((await host.emit('vote', { suspectId: host.view.meId })).ok, false, 'self vote rejected');
 
   // Everyone votes for the thief -> patrons win.
   const thief = clients.find((c) => c.view.role === 'thief');
   for (const c of clients) {
     const target = c === thief ? clients.find((x) => x !== thief) : thief;
-    assert((await c.emit('vote', { suspectId: target.socket.id })).ok, 'vote ok');
+    assert((await c.emit('vote', { suspectId: target.view.meId })).ok, 'vote ok');
   }
   await wait(100);
   assert.strictEqual(host.view.phase, 'result');
   assert.strictEqual(host.view.result.winner, 'patrons');
-  assert.strictEqual(host.view.result.thiefId, thief.socket.id);
+  assert.strictEqual(host.view.result.thiefId, thief.view.meId);
 
   // Play again, then force a tie to check the Thief-walks rule.
   assert((await host.emit('playAgain')).ok);
@@ -101,10 +100,10 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   assert.strictEqual(host.view.phase, 'vote');
   // 2 votes for client[0]... build a 2-2 tie: A,B -> C ; C,D -> A  (A voting for C, B for C, C for A, D for A)
   const [A, B, C, D] = clients;
-  await A.emit('vote', { suspectId: C.socket.id });
-  await B.emit('vote', { suspectId: C.socket.id });
-  await C.emit('vote', { suspectId: A.socket.id });
-  await D.emit('vote', { suspectId: A.socket.id });
+  await A.emit('vote', { suspectId: C.view.meId });
+  await B.emit('vote', { suspectId: C.view.meId });
+  await C.emit('vote', { suspectId: A.view.meId });
+  await D.emit('vote', { suspectId: A.view.meId });
   await wait(100);
   assert.strictEqual(host.view.phase, 'result');
   assert.strictEqual(host.view.result.tie, true, 'tie detected');

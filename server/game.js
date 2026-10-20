@@ -1,4 +1,10 @@
 // Pure game logic for "Who Stole the Bell?" - no networking in here, so it's easy to test.
+//
+// Players have a stable public `id` (used everywhere in game state), a secret `token` (only ever
+// sent to that player, used to rejoin after a dropped connection) and a `socketId` (which changes
+// every time they reconnect). Views sent to clients never contain tokens or socket ids.
+
+const crypto = require('crypto');
 
 const MIN_PLAYERS = 3;
 const MAX_PLAYERS = 12;
@@ -17,13 +23,25 @@ function makeCode() {
   return code;
 }
 
-function createRoom(hostId, hostName) {
+function newPlayer(socketId, name) {
+  return {
+    id: crypto.randomUUID(),
+    token: crypto.randomUUID(),
+    socketId,
+    name: cleanName(name),
+    connected: true, // false while their phone is offline (shown as "away")
+    gone: false, // true once they've been offline longer than the grace period, or left on purpose
+  };
+}
+
+function createRoom(hostName, socketId) {
   const code = makeCode();
+  const host = newPlayer(socketId, hostName);
   const room = {
     code,
-    hostId,
+    hostId: host.id,
     phase: 'lobby', // lobby -> alibi -> discuss -> vote -> result
-    players: [{ id: hostId, name: cleanName(hostName), connected: true }],
+    players: [host],
     thiefId: null,
     alibis: {}, // playerId -> text
     chat: [], // { id, playerId, name, text, ts }
@@ -33,7 +51,7 @@ function createRoom(hostId, hostName) {
     result: null,
   };
   rooms.set(code, room);
-  return room;
+  return { room, player: host };
 }
 
 function cleanName(name) {
@@ -44,7 +62,7 @@ function getRoom(code) {
   return rooms.get(String(code || '').toUpperCase().trim());
 }
 
-function joinRoom(code, playerId, name) {
+function joinRoom(code, name, socketId) {
   const room = getRoom(code);
   if (!room) return { error: 'Room not found.' };
   if (room.phase !== 'lobby') return { error: 'Game already started.' };
@@ -53,15 +71,73 @@ function joinRoom(code, playerId, name) {
   if (room.players.some((p) => p.name.toLowerCase() === clean.toLowerCase())) {
     return { error: 'That name is taken in this room.' };
   }
-  room.players.push({ id: playerId, name: clean, connected: true });
-  return { room };
+  const player = newPlayer(socketId, clean);
+  room.players.push(player);
+  return { room, player };
+}
+
+// A player whose phone dropped comes back with their token and gets the same seat (same id, same role).
+function rejoin(code, token, socketId) {
+  const room = getRoom(code);
+  if (!room) return { error: 'That table no longer exists.' };
+  const wanted = String(token || '');
+  const player = wanted && room.players.find((p) => p.token === wanted);
+  if (!player) return { error: 'Your seat at that table is gone.' };
+  const previousSocketId = player.socketId;
+  player.socketId = socketId;
+  player.connected = true;
+  player.gone = false;
+  return { room, player, previousSocketId };
+}
+
+// Phone went offline. They keep their seat; the server decides later (expirePlayer) if they're really gone.
+function disconnectPlayer(room, playerId) {
+  const p = room.players.find((x) => x.id === playerId);
+  if (!p) return;
+  p.connected = false;
+  p.socketId = null;
+}
+
+// Called when the grace period runs out. Does nothing if the player already came back.
+function expirePlayer(room, playerId) {
+  const p = room.players.find((x) => x.id === playerId);
+  if (!p || p.connected) return { deleted: false };
+  p.gone = true;
+  if (room.phase === 'lobby') room.players = room.players.filter((x) => x.id !== playerId);
+
+  if (room.players.every((x) => x.gone)) {
+    rooms.delete(room.code);
+    return { deleted: true };
+  }
+  if (room.hostId === playerId) {
+    const next = room.players.find((x) => !x.gone && x.connected) || room.players.find((x) => !x.gone);
+    if (next) room.hostId = next.id;
+  }
+  // The game may have been waiting on this player.
+  checkProgress(room);
+  return { deleted: false };
+}
+
+// Leaving on purpose skips the grace period.
+function leavePlayer(room, playerId) {
+  disconnectPlayer(room, playerId);
+  return expirePlayer(room, playerId);
+}
+
+// Move on automatically once everyone who is still in the game has done their part.
+function checkProgress(room) {
+  const active = room.players.filter((p) => !p.gone);
+  if (active.length === 0) return;
+  if (room.phase === 'alibi' && active.every((p) => room.alibis[p.id])) startDiscussion(room);
+  else if (room.phase === 'vote' && active.every((p) => room.votes[p.id])) finishVote(room);
 }
 
 function startGame(room, requesterId) {
   if (requesterId !== room.hostId) return { error: 'Only the host can start.' };
   if (room.phase !== 'lobby' && room.phase !== 'result') return { error: 'Game already running.' };
-  if (room.players.length < MIN_PLAYERS) return { error: `Need at least ${MIN_PLAYERS} players.` };
-  const thief = room.players[Math.floor(Math.random() * room.players.length)];
+  const live = room.players.filter((p) => p.connected && !p.gone);
+  if (live.length < MIN_PLAYERS) return { error: `Need at least ${MIN_PLAYERS} players online.` };
+  const thief = live[Math.floor(Math.random() * live.length)];
   room.thiefId = thief.id;
   resetRound(room);
   room.phase = 'alibi';
@@ -83,8 +159,7 @@ function submitAlibi(room, playerId, text) {
   const clean = String(text || '').trim().slice(0, 140);
   if (!clean) return { error: 'Write something.' };
   room.alibis[playerId] = clean;
-  // Move on automatically once everyone has submitted.
-  if (room.players.filter((p) => p.connected).every((p) => room.alibis[p.id])) startDiscussion(room);
+  checkProgress(room);
   return { room };
 }
 
@@ -124,7 +199,7 @@ function castVote(room, voterId, suspectId) {
   if (!room.players.some((p) => p.id === suspectId)) return { error: 'Unknown suspect.' };
   if (voterId === suspectId) return { error: "You can't vote for yourself." };
   room.votes[voterId] = suspectId;
-  if (room.players.filter((p) => p.connected).every((p) => room.votes[p.id])) finishVote(room);
+  checkProgress(room);
   return { room };
 }
 
@@ -154,28 +229,10 @@ function finishVote(room) {
   room.phase = 'result';
 }
 
-function removePlayer(room, playerId) {
-  const p = room.players.find((x) => x.id === playerId);
-  if (!p) return;
-  if (room.phase === 'lobby') {
-    room.players = room.players.filter((x) => x.id !== playerId);
-  } else {
-    p.connected = false; // keep them so the game state stays consistent
-  }
-  if (room.players.every((x) => !x.connected) || room.players.length === 0) {
-    rooms.delete(room.code);
-    return;
-  }
-  if (room.hostId === playerId) {
-    const next = room.players.find((x) => x.connected);
-    if (next) room.hostId = next.id;
-  }
-}
-
 function backToLobby(room, requesterId) {
   if (requesterId !== room.hostId) return { error: 'Only the host can do that.' };
   room.phase = 'lobby';
-  room.players = room.players.filter((p) => p.connected);
+  room.players = room.players.filter((p) => !p.gone);
   room.thiefId = null;
   resetRound(room);
   return { room };
@@ -212,6 +269,10 @@ module.exports = {
   rooms,
   createRoom,
   joinRoom,
+  rejoin,
+  disconnectPlayer,
+  expirePlayer,
+  leavePlayer,
   getRoom,
   startGame,
   submitAlibi,
@@ -220,7 +281,6 @@ module.exports = {
   sendChat,
   castVote,
   forceFinish,
-  removePlayer,
   backToLobby,
   viewFor,
   MIN_PLAYERS,

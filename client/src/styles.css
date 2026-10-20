@@ -36,6 +36,17 @@ html, body {
 }
 .top h1 { font-size: 1.35rem; margin: 0; letter-spacing: 0.01em; }
 .bell-icon { font-size: 1.6rem; }
+.top .link {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-decoration: underline;
+  min-height: 44px;
+  padding: 0 4px;
+}
 
 .banner {
   background: var(--panel-2);
@@ -158,15 +169,18 @@ button.primary { background: var(--brass); border-color: var(--brass-dark); colo
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 7px 12px;
 }
-.alibis strong { color: var(--brass); font-size: 0.85rem; }
+.alibis strong { color: var(--brass); font-size: 0.8rem; }
 .alibis span { line-height: 1.4; }
 
 .suspects { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .suspects button.selected { background: var(--brass); color: #1a1208; border-color: var(--brass-dark); }
 
 .timer {
+  position: sticky; /* stays on screen while you scroll the alibis and chat */
+  top: 8px;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -185,7 +199,7 @@ button.primary { background: var(--brass); border-color: var(--brass-dark); colo
 
 .chat { display: flex; flex-direction: column; gap: 8px; }
 .chat-list {
-  height: 240px;
+  height: clamp(150px, 26dvh, 260px);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -206,7 +220,15 @@ button.primary { background: var(--brass); border-color: var(--brass-dark); colo
 }
 .msg.mine { align-self: flex-end; align-items: flex-end; }
 .msg.mine span { background: var(--brass); color: #1a1208; }
-.chat-form { display: flex; gap: 8px; }
+.chat-form {
+  display: flex;
+  gap: 8px;
+  position: sticky; /* the message box is always reachable, even with a long list of alibis above */
+  bottom: 8px;
+  background: var(--panel);
+  padding: 6px 0 calc(2px + env(safe-area-inset-bottom));
+  z-index: 2;
+}
 .chat-form input { flex: 1; min-width: 0; }
 
 .win { color: #a6e3a6; }

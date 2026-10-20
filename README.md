@@ -30,14 +30,14 @@ npm test
 
 Two server settings you can change (environment variables):
 
-- `DISCUSS_SECONDS`: how long the discussion lasts (default 120).
+- `DISCUSS_SECONDS`: how long the discussion lasts (default 59).
 - `GRACE_SECONDS`: how long a dropped player keeps their seat before the game treats them as gone (default 60).
 
 ## How a round works
 
 1. **Lobby:** host creates a table, friends join with the code. Minimum 3 players.
 2. **Alibi:** each player secretly sees their role. Everyone writes where they were when the bell vanished. The Thief has to make one up.
-3. **Discussion:** all alibis are revealed and a group chat opens with a countdown (2 minutes by default). Players grill each other and try to sniff out the Thief. The server runs the clock, so it moves on even if someone closes their tab. The host can end it early.
+3. **Discussion:** all alibis are revealed and a group chat opens with a countdown (59 seconds by default). Players grill each other and try to sniff out the Thief. The server runs the clock, so it moves on even if someone closes their tab. The host can end it early.
 4. **Vote:** the bell rings when time is up. Everyone votes for who they think took the bell (no self-votes, you can change your vote until everyone is in). Chat stays open.
 5. **Result:** most votes wins the accusation. If the Thief is accused, the Patrons win. A tie or no clear majority means the Thief gets away. The bell rings.
 

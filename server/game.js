@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const MIN_PLAYERS = 3;
 const MAX_PLAYERS = 12;
 // How long the group chat discussion lasts. Override with DISCUSS_SECONDS (the tests use a short one).
-const DISCUSS_SECONDS = Number(process.env.DISCUSS_SECONDS) || 120;
+const DISCUSS_SECONDS = Number(process.env.DISCUSS_SECONDS) || 59;
 const MAX_CHAT_MESSAGES = 200;
 
 const rooms = new Map();

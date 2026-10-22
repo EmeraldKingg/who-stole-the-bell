@@ -11,6 +11,35 @@ const MAX_PLAYERS = 12;
 // How long the group chat discussion lasts. Override with DISCUSS_SECONDS (the tests use a short one).
 const DISCUSS_SECONDS = Number(process.env.DISCUSS_SECONDS) || 59;
 const MAX_CHAT_MESSAGES = 200;
+// With this many players or more, one Patron is secretly made the Thief's accomplice and holds the bell.
+const ACCOMPLICE_MIN_PLAYERS = 5;
+
+// Red herrings: harmless things that look suspicious. Some Patrons get one as a private secret.
+// `clue` is the suspicious part, `truth` is the innocent explanation (both are only shown to that player
+// until the result screen).
+const HERRINGS = [
+  { clue: 'You have a shiny object in your pocket.', truth: "It's your house key." },
+  { clue: 'You left the table twice to take a phone call.', truth: 'It was your mum checking you were OK.' },
+  { clue: 'You were seen pocketing something small.', truth: 'It was a mint from the counter.' },
+  { clue: 'You were the last one out of the restaurant.', truth: 'You went back for your jacket.' },
+  { clue: 'You hid something under the table.', truth: 'It was your sunglasses.' },
+  { clue: 'You tapped the bell once, just to hear it.', truth: "It was still on the table afterwards. You'd swear to it." },
+  { clue: 'You were whispering with the waiter.', truth: 'You were asking where the toilets were.' },
+  { clue: 'Your bag was heavier on the way out.', truth: 'Leftovers in a takeaway box.' },
+  { clue: 'You wandered into the kitchen.', truth: 'You were looking for the toilets (again).' },
+  { clue: 'You were fiddling with something metal.', truth: "It's a bracelet with a loose clasp." },
+  { clue: 'You laughed far too loudly when the bell went missing.', truth: "You'd just remembered an old joke." },
+  { clue: 'You kept glancing at the door.', truth: "You were waiting for a ride that never came." },
+];
+
+function shuffled(list) {
+  const a = [...list];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 const rooms = new Map();
 
@@ -43,6 +72,8 @@ function createRoom(hostName, socketId) {
     phase: 'lobby', // lobby -> alibi -> discuss -> vote -> result
     players: [host],
     thiefId: null,
+    accompliceId: null, // only set with enough players
+    herrings: {}, // playerId -> { clue, truth }, for the Patrons who got a red herring
     alibis: {}, // playerId -> text
     chat: [], // { id, playerId, name, text, ts }
     discussEndsAt: null, // ms timestamp, set when the discussion starts
@@ -137,14 +168,29 @@ function startGame(room, requesterId) {
   if (room.phase !== 'lobby' && room.phase !== 'result') return { error: 'Game already running.' };
   const live = room.players.filter((p) => p.connected && !p.gone);
   if (live.length < MIN_PLAYERS) return { error: `Need at least ${MIN_PLAYERS} players online.` };
-  const thief = live[Math.floor(Math.random() * live.length)];
-  room.thiefId = thief.id;
   resetRound(room);
+
+  // Everyone is shuffled once, then handed out in order: Thief, (accomplice), then Patrons.
+  const order = shuffled(live);
+  const thief = order.shift();
+  room.thiefId = thief.id;
+  if (live.length >= ACCOMPLICE_MIN_PLAYERS) room.accompliceId = order.shift().id;
+
+  // About half of the remaining Patrons get a different red herring each.
+  const withSecret = order.slice(0, Math.ceil(order.length / 2));
+  const herrings = shuffled(HERRINGS);
+  withSecret.forEach((p, i) => {
+    room.herrings[p.id] = herrings[i % herrings.length];
+  });
+
   room.phase = 'alibi';
   return { room };
 }
 
 function resetRound(room) {
+  room.thiefId = null;
+  room.accompliceId = null;
+  room.herrings = {};
   room.alibis = {};
   room.votes = {};
   room.chat = [];
@@ -222,6 +268,8 @@ function finishVote(room) {
   room.result = {
     accusedId,
     thiefId: room.thiefId,
+    accompliceId: room.accompliceId,
+    herrings: Object.entries(room.herrings).map(([playerId, h]) => ({ playerId, clue: h.clue, truth: h.truth })),
     tally,
     winner: accusedId === room.thiefId ? 'patrons' : 'thief',
     tie: top.length > 1,
@@ -233,7 +281,6 @@ function backToLobby(room, requesterId) {
   if (requesterId !== room.hostId) return { error: 'Only the host can do that.' };
   room.phase = 'lobby';
   room.players = room.players.filter((p) => !p.gone);
-  room.thiefId = null;
   resetRound(room);
   return { room };
 }
@@ -241,12 +288,25 @@ function backToLobby(room, requesterId) {
 // What a specific player is allowed to see. The Thief's identity stays secret until the result.
 function viewFor(room, playerId) {
   const me = room.players.find((p) => p.id === playerId);
+  const inGame = room.phase !== 'lobby' && !!me;
+
+  // The Thief and the accomplice know each other. Nobody else is told who they are.
+  let partner = null;
+  if (inGame && room.accompliceId && (playerId === room.thiefId || playerId === room.accompliceId)) {
+    const other = room.players.find((p) => p.id === (playerId === room.thiefId ? room.accompliceId : room.thiefId));
+    if (other) partner = { id: other.id, name: other.name };
+  }
+
   return {
     code: room.code,
     phase: room.phase,
     hostId: room.hostId,
     meId: playerId,
-    role: room.phase === 'lobby' || !me ? null : playerId === room.thiefId ? 'thief' : 'patron',
+    role: !inGame ? null : playerId === room.thiefId ? 'thief' : playerId === room.accompliceId ? 'accomplice' : 'patron',
+    partner,
+    // Everyone is told there's an accomplice this round (it follows from the player count), but not who.
+    hasAccomplice: inGame && !!room.accompliceId,
+    secret: inGame ? room.herrings[playerId] || null : null, // your own red herring, if you got one
     players: room.players.map((p) => ({
       id: p.id,
       name: p.name,

@@ -235,24 +235,60 @@ function Lobby({ view, run }) {
   );
 }
 
-function RoleCard({ role }) {
+// Hidden by default so nobody reads your role over your shoulder. The Thief and the accomplice
+// share the red card; Patrons get the green one.
+function RoleCard({ view }) {
   const [shown, setShown] = useState(false);
-  const isThief = role === 'thief';
+  const { role, partner, hasAccomplice, secret } = view;
 
   return (
-    <div className={`role ${shown ? (isThief ? 'thief' : 'patron') : 'hidden'}`}>
+    <div className={`role ${shown ? (role === 'patron' ? 'patron' : 'thief') : 'hidden'}`}>
       {shown ? (
-        isThief ? (
-          <>
-            <h2>You took the bell.</h2>
-            <p>Blend in. Make up an alibi that sounds true, and don't get voted out.</p>
-          </>
-        ) : (
-          <>
-            <h2>You're a Patron.</h2>
-            <p>You're innocent. Listen to the alibis and spot who's lying.</p>
-          </>
-        )
+        <>
+          {role === 'thief' && (
+            <>
+              <h2>You took the bell.</h2>
+              <p>Blend in. Make up an alibi that sounds true, and don't get voted out.</p>
+              {partner && (
+                <p>
+                  Your accomplice is <strong>{partner.name}</strong>. Cover for each other, but don't be too
+                  obvious. If the table votes out your accomplice instead of you, you still win.
+                </p>
+              )}
+            </>
+          )}
+          {role === 'accomplice' && (
+            <>
+              <h2>You're the accomplice.</h2>
+              <p>
+                <strong>{partner?.name}</strong> took the bell. Keep them safe and steer the table towards
+                someone else. If the table votes you out instead, the Thief still wins.
+              </p>
+            </>
+          )}
+          {role === 'patron' && (
+            <>
+              <h2>You're a Patron.</h2>
+              <p>You're innocent. Listen to the alibis and spot who's lying.</p>
+              {hasAccomplice && (
+                <p>
+                  Careful: someone is helping the Thief. You have to catch the Thief themselves, so voting out
+                  the accomplice isn't enough.
+                </p>
+              )}
+            </>
+          )}
+          {secret && (
+            <div className="secret">
+              <p className="label">Your red herring</p>
+              <p className="clue">{secret.clue}</p>
+              <p>
+                The innocent truth: {secret.truth} Only you know this. It can make you look guilty, so decide
+                when to bring it up.
+              </p>
+            </div>
+          )}
+        </>
       ) : (
         <p>Your role is hidden</p>
       )}
@@ -270,7 +306,7 @@ function Alibi({ view, run }) {
 
   return (
     <section className="card">
-      <RoleCard role={view.role} />
+      <RoleCard view={view} />
 
       <h3>Where were you when the bell vanished?</h3>
       {submitted ? (
@@ -284,7 +320,9 @@ function Alibi({ view, run }) {
             placeholder={
               view.role === 'thief'
                 ? 'Lie convincingly. Keep it believable.'
-                : 'Tell the truth about where you were.'
+                : view.role === 'accomplice'
+                  ? "Write a believable alibi that helps cover for the Thief."
+                  : 'Tell the truth about where you were.'
             }
             onChange={(e) => setText(e.target.value)}
           />
@@ -395,7 +433,7 @@ function Discuss({ view, run }) {
 
   return (
     <section className="card">
-      <RoleCard role={view.role} />
+      <RoleCard view={view} />
 
       <div className={`timer ${secs <= 10 ? 'urgent' : ''}`} role="timer" aria-live="off">
         <span className="timer-label">Last orders in</span>
@@ -424,7 +462,7 @@ function Vote({ view, run }) {
 
   return (
     <section className="card">
-      <RoleCard role={view.role} />
+      <RoleCard view={view} />
       <h3>Time's up. Who's lying?</h3>
 
       <AlibiRecap view={view} />
@@ -468,6 +506,7 @@ function Result({ view, run }) {
   }, []);
 
   const caught = r.winner === 'patrons';
+  const accusedAccomplice = !!r.accompliceId && r.accusedId === r.accompliceId;
 
   return (
     <section className="card">
@@ -477,11 +516,18 @@ function Result({ view, run }) {
       <p className="reveal">
         The Thief was <strong>{nameOf(r.thiefId)}</strong>.
       </p>
+      {r.accompliceId && (
+        <p className="reveal">
+          The accomplice was <strong>{nameOf(r.accompliceId)}</strong>.
+        </p>
+      )}
       <p className="hint">
         {r.tie
           ? 'The vote was tied, so nobody was caught.'
           : r.accusedId
-            ? `The table accused ${nameOf(r.accusedId)}.`
+            ? accusedAccomplice
+              ? `The table accused ${nameOf(r.accusedId)}, but that was only the accomplice.`
+              : `The table accused ${nameOf(r.accusedId)}.`
             : 'Nobody got any votes.'}
       </p>
 
@@ -492,11 +538,27 @@ function Result({ view, run }) {
             <span>
               {p.name}
               {p.id === r.thiefId && <span className="tag thief-tag">thief</span>}
+              {p.id === r.accompliceId && <span className="tag accomplice-tag">accomplice</span>}
             </span>
             <span>{r.tally[p.id] || 0}</span>
           </li>
         ))}
       </ul>
+
+      {r.herrings.length > 0 && (
+        <>
+          <p className="label">Red herrings (innocent, but they looked guilty)</p>
+          <ul className="alibis">
+            {r.herrings.map((h) => (
+              <li key={h.playerId}>
+                <strong>{nameOf(h.playerId)}</strong>
+                <span>{h.clue}</span>
+                <span className="truth">Actually: {h.truth}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
 
       {isHost ? (
         <button className="primary" onClick={() => run('playAgain')}>

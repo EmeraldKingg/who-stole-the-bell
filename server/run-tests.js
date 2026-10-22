@@ -2,7 +2,7 @@
 const { spawn } = require('child_process');
 
 const PORT = process.env.TEST_PORT || '3101';
-const SCRIPTS = ['test-sim.js', 'test-reconnect.js'];
+const SCRIPTS = ['test-roles.js', 'test-sim.js', 'test-reconnect.js'];
 
 const server = spawn(process.execPath, ['index.js'], {
   cwd: __dirname,

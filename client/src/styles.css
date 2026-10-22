@@ -156,6 +156,18 @@ button.primary { background: var(--brass); border-color: var(--brass-dark); colo
 }
 .role p { margin: 0; color: var(--muted); }
 .role h2 { font-size: 1.15rem; }
+.role strong { color: var(--brass); }
+.role .secret {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+.role .secret .label { margin: 0; }
+.role .secret .clue { color: var(--text); font-weight: 600; }
+.accomplice-tag { color: #ffd59a; border-color: var(--brass-dark); }
+.alibis .truth { color: var(--muted); font-size: 0.85rem; }
 .role.thief { border: 1px solid var(--red); }
 .role.thief h2 { color: #ffb4b0; }
 .role.patron { border: 1px solid var(--green); }

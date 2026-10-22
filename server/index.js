@@ -4,6 +4,7 @@ const http = require('http');
 const express = require('express');
 const { Server } = require('socket.io');
 const game = require('./game');
+const world = require('./world');
 
 const app = express();
 const server = http.createServer(app);
@@ -90,6 +91,27 @@ function broadcast(room) {
   }
 }
 
+// Map mode: while a round is being walked, move everyone 20 times a second and tell each player
+// what they can see. The server decides all movement; phones only say which way they want to go.
+const TICK_MS = 50;
+setInterval(() => {
+  const now = Date.now();
+  for (const room of game.rooms.values()) {
+    if (room.phase !== 'play') continue;
+    game.tickWorld(room, now);
+    if (room.phase !== 'play') {
+      broadcast(room); // the round ended (closing time, or the Thief left)
+      continue;
+    }
+    for (const p of room.players) {
+      if (!p.socketId) continue;
+      const snap = game.worldFor(room, p.id, now);
+      // volatile: if a phone is behind, drop the old snapshot instead of queueing it up
+      if (snap) io.to(p.socketId).volatile.emit('world', snap);
+    }
+  }
+}, TICK_MS);
+
 io.on('connection', (socket) => {
   let currentCode = null;
   let playerId = null;
@@ -161,6 +183,24 @@ io.on('connection', (socket) => {
       reply(cb, { ok: true });
     });
 
+  // Map mode. The map never changes, so a phone asks for it once.
+  socket.on('map', (_payload, cb) => reply(cb, { ok: true, map: world.PUBLIC_MAP }));
+
+  // Walking: sent often, so no reply and no state broadcast.
+  socket.on('input', ({ dx, dy } = {}) => {
+    const seat = mySeat();
+    if (seat) game.setInput(seat.room, playerId, dx, dy);
+  });
+
+  socket.on('steal', (_payload, cb) => {
+    const seat = mySeat();
+    if (!seat) return reply(cb, { ok: false, error: 'Room not found.' });
+    const result = game.stealBell(seat.room, playerId);
+    reply(cb, result.error ? { ok: false, error: result.error } : { ok: true });
+  });
+
+  action('mode', (room, { mode }) => game.setMode(room, playerId, mode));
+  action('report', (room) => game.reportBell(room, playerId));
   action('start', (room) => game.startGame(room, playerId));
   action('alibi', (room, { text }) => game.submitAlibi(room, playerId, text));
   action('advance', (room) => game.advance(room, playerId));

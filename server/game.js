@@ -5,6 +5,7 @@
 // every time they reconnect). Views sent to clients never contain tokens or socket ids.
 
 const crypto = require('crypto');
+const world = require('./world');
 
 const MIN_PLAYERS = 3;
 const MAX_PLAYERS = 12;
@@ -69,8 +70,15 @@ function createRoom(hostName, socketId) {
   const room = {
     code,
     hostId: host.id,
-    phase: 'lobby', // lobby -> alibi -> discuss -> vote -> result
+    // 'classic': lobby -> alibi -> discuss -> vote -> result
+    // 'map':     lobby -> play (walk around) -> discuss -> vote -> result
+    mode: 'classic',
+    phase: 'lobby',
     players: [host],
+    world: null, // map mode only: positions, bells, closing time (see world.js)
+    inputAt: {}, // playerId -> when we last heard which way they want to walk
+    lastTick: 0,
+    report: null, // map mode: who reported the empty bell stand, and where
     thiefId: null,
     accompliceId: null, // only set with enough players
     herrings: {}, // playerId -> { clue, truth }, for the Patrons who got a red herring
@@ -118,6 +126,11 @@ function rejoin(code, token, socketId) {
   player.socketId = socketId;
   player.connected = true;
   player.gone = false;
+  // Back during a walk-around round after being written off: put them back in the restaurant.
+  if (room.world && !room.world.players[player.id]) {
+    const s = world.spawnPoint(room.players.indexOf(player));
+    room.world.players[player.id] = { x: s.x, y: s.y, face: 0, dx: 0, dy: 0 };
+  }
   return { room, player, previousSocketId };
 }
 
@@ -134,6 +147,7 @@ function expirePlayer(room, playerId) {
   const p = room.players.find((x) => x.id === playerId);
   if (!p || p.connected) return { deleted: false };
   p.gone = true;
+  if (room.world) delete room.world.players[playerId]; // no motionless ghost left standing in the restaurant
   if (room.phase === 'lobby') room.players = room.players.filter((x) => x.id !== playerId);
 
   if (room.players.every((x) => x.gone)) {
@@ -183,11 +197,30 @@ function startGame(room, requesterId) {
     room.herrings[p.id] = herrings[i % herrings.length];
   });
 
-  room.phase = 'alibi';
+  if (room.mode === 'map') {
+    const now = Date.now();
+    room.world = world.createWorld(room.players.filter((p) => !p.gone).map((p) => p.id), now);
+    room.lastTick = now;
+    room.phase = 'play';
+  } else {
+    room.phase = 'alibi';
+  }
+  return { room };
+}
+
+// The host picks how this table is played, before the game starts.
+function setMode(room, requesterId, mode) {
+  if (requesterId !== room.hostId) return { error: 'Only the host can do that.' };
+  if (room.phase !== 'lobby') return { error: 'Pick a mode before the game starts.' };
+  if (mode !== 'classic' && mode !== 'map') return { error: 'Unknown mode.' };
+  room.mode = mode;
   return { room };
 }
 
 function resetRound(room) {
+  room.world = null;
+  room.inputAt = {};
+  room.report = null;
   room.thiefId = null;
   room.accompliceId = null;
   room.herrings = {};
@@ -256,6 +289,72 @@ function forceFinish(room, requesterId) {
   return { room };
 }
 
+// ---- Map mode: walking around the restaurant -----------------------------------------------------------
+
+// Someone who hasn't sent a direction for this long stops walking, so a lost "key up" can't leave
+// them running into a wall forever.
+const INPUT_STALE_MS = 1500;
+
+function setInput(room, playerId, dx, dy, now = Date.now()) {
+  if (room.phase !== 'play' || !room.world) return;
+  world.setInput(room.world, playerId, dx, dy);
+  room.inputAt[playerId] = now;
+}
+
+function stealBell(room, playerId, now = Date.now()) {
+  if (room.phase !== 'play' || !room.world) return { error: 'Nothing to steal right now.' };
+  const result = world.steal(room.world, playerId, playerId === room.thiefId, now);
+  return result.error ? result : { room };
+}
+
+// Walking up to an empty bell stand and reporting it calls everyone together: discussion, then the vote.
+function reportBell(room, playerId, now = Date.now()) {
+  if (room.phase !== 'play' || !room.world) return { error: 'Nothing to report right now.' };
+  const result = world.report(room.world, playerId, now);
+  if (result.error) return result;
+  const table = world.TABLES.find((t) => t.id === result.table);
+  room.report = { byId: playerId, tableName: table ? table.name : 'a table' };
+  for (const p of Object.values(room.world.players)) {
+    p.dx = 0;
+    p.dy = 0;
+  }
+  startDiscussion(room, now);
+  return { room };
+}
+
+// Called many times a second while a map round is on: moves everyone, then checks for closing time.
+function tickWorld(room, now = Date.now()) {
+  if (room.phase !== 'play' || !room.world) return;
+  const w = room.world;
+  for (const p of room.players) {
+    const wp = w.players[p.id];
+    if (!wp) continue;
+    // Offline or silent players stand still.
+    if (p.gone || !p.connected || now - (room.inputAt[p.id] || 0) > INPUT_STALE_MS) {
+      wp.dx = 0;
+      wp.dy = 0;
+    }
+  }
+  const dt = (now - room.lastTick) / 1000;
+  room.lastTick = now;
+  world.step(w, dt);
+
+  const thief = room.players.find((p) => p.id === room.thiefId);
+  if (!thief || thief.gone) return endRound(room, { winner: 'patrons', reason: 'left' });
+  if (now >= w.endsAt) {
+    // Closing time. If a bell went missing and nobody caught the Thief, the Thief wins.
+    const stolen = !!w.stolenTable;
+    endRound(room, { winner: stolen ? 'thief' : 'patrons', reason: stolen ? 'closing' : 'nothing' });
+  }
+}
+
+// Everything one player is allowed to know about the restaurant right now (null if not walking around).
+function worldFor(room, playerId, now = Date.now()) {
+  if (room.phase !== 'play' || !room.world) return null;
+  const snap = world.snapshotFor(room.world, playerId, playerId === room.thiefId, now);
+  return snap && { ...snap, now };
+}
+
 function finishVote(room) {
   const tally = {};
   for (const suspectId of Object.values(room.votes)) {
@@ -265,16 +364,33 @@ function finishVote(room) {
   const top = Object.keys(tally).filter((id) => tally[id] === max);
   // A tie or no votes means nobody is cleanly caught, so the Thief walks.
   const accusedId = top.length === 1 ? top[0] : null;
+  endRound(room, {
+    accusedId,
+    tally,
+    winner: accusedId === room.thiefId ? 'patrons' : 'thief',
+    tie: top.length > 1,
+    reason: 'vote',
+  });
+}
+
+// Builds the result screen's data and ends the round. `reason` says how it ended:
+//   'vote'    the table voted
+//   'closing' a bell was stolen and nobody caught the Thief by closing time (map mode)
+//   'nothing' the Thief never stole anything before closing (map mode)
+//   'left'    the Thief walked out (map mode)
+function endRound(room, { accusedId = null, tally = {}, winner, tie = false, reason }) {
   room.result = {
     accusedId,
     thiefId: room.thiefId,
     accompliceId: room.accompliceId,
     herrings: Object.entries(room.herrings).map(([playerId, h]) => ({ playerId, clue: h.clue, truth: h.truth })),
     tally,
-    winner: accusedId === room.thiefId ? 'patrons' : 'thief',
-    tie: top.length > 1,
+    winner,
+    tie,
+    reason,
   };
   room.phase = 'result';
+  room.discussEndsAt = null;
 }
 
 function backToLobby(room, requesterId) {
@@ -322,6 +438,11 @@ function viewFor(room, playerId) {
     myVote: room.votes[playerId] || null,
     result: room.phase === 'result' ? room.result : null,
     minPlayers: MIN_PLAYERS,
+    mode: room.mode,
+    // Map mode: who reported the empty bell stand (shown once the discussion starts).
+    report: room.report
+      ? { byId: room.report.byId, byName: room.players.find((p) => p.id === room.report.byId)?.name ?? 'Someone', tableName: room.report.tableName }
+      : null,
   };
 }
 
@@ -343,5 +464,11 @@ module.exports = {
   forceFinish,
   backToLobby,
   viewFor,
+  setMode,
+  setInput,
+  stealBell,
+  reportBell,
+  tickWorld,
+  worldFor,
   MIN_PLAYERS,
 };

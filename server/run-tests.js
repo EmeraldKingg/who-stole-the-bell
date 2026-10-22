@@ -2,11 +2,11 @@
 const { spawn } = require('child_process');
 
 const PORT = process.env.TEST_PORT || '3101';
-const SCRIPTS = ['test-roles.js', 'test-sim.js', 'test-reconnect.js'];
+const SCRIPTS = ['test-world.js', 'test-map.js', 'test-roles.js', 'test-sim.js', 'test-map-sim.js', 'test-reconnect.js'];
 
 const server = spawn(process.execPath, ['index.js'], {
   cwd: __dirname,
-  env: { ...process.env, PORT, DISCUSS_SECONDS: '2', GRACE_SECONDS: '2' },
+  env: { ...process.env, PORT, DISCUSS_SECONDS: '2', GRACE_SECONDS: '2', NIGHT_SECONDS: '8', STEAL_LOCKOUT_SECONDS: '0' },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 
